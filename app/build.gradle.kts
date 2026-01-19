@@ -21,6 +21,10 @@ dependencies {
 
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 
+    implementation("com.ibm.mq:com.ibm.mq.allclient:9.3.4.0")
+
+    implementation("io.github.cdimascio:dotenv-java:3.0.0")
+
     // This dependency is used by the application.
     implementation(libs.guava)
 }

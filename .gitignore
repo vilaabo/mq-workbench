@@ -18,6 +18,9 @@
 # Generated files
 .idea/**/contentModel.xml
 
+# Environment
+.env
+
 # Sensitive or high-churn files
 .idea/**/dataSources/
 .idea/**/dataSources.ids
@@ -147,7 +150,8 @@ replay_pid*
 .LSOverride
 
 # Icon must end with two \r
-Icon
+Icon
+
 
 # Thumbnails
 ._*
