@@ -51,7 +51,7 @@ public class MqSender {
                 System.out.println("  correlationId      = " + HEX.formatHex(msg.correlationId));
                 System.out.println("  replyToQueue       = '" + msg.replyToQueueName + "'");
                 System.out.println("  replyToQMgr        = '" + msg.replyToQueueManagerName + "'");
-                System.out.println("  dataLength         = " + msg.getDataLength() + " bytes");
+                System.out.println("  totalLength        = " + msg.getMessageLength() + " bytes");
 
                 MQPutMessageOptions pmo = new MQPutMessageOptions();
                 pmo.options = MQConstants.MQPMO_NO_SYNCPOINT | MQConstants.MQPMO_FAIL_IF_QUIESCING;
