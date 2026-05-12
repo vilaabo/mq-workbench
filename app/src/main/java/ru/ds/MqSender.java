@@ -39,9 +39,26 @@ public class MqSender {
 
                 msg.writeString(text);
 
+                System.out.println("[MqSender] PUT → " + queueName);
+                System.out.println("  messageType        = " + msg.messageType);
+                System.out.println("  format             = '" + msg.format + "'");
+                System.out.println("  characterSet       = " + msg.characterSet);
+                System.out.println("  encoding           = " + msg.encoding);
+                System.out.println("  priority           = " + msg.priority);
+                System.out.println("  persistence        = " + msg.persistence);
+                System.out.println("  expiry             = " + msg.expiry);
+                System.out.println("  messageId (before) = " + HEX.formatHex(msg.messageId));
+                System.out.println("  correlationId      = " + HEX.formatHex(msg.correlationId));
+                System.out.println("  replyToQueue       = '" + msg.replyToQueueName + "'");
+                System.out.println("  replyToQMgr        = '" + msg.replyToQueueManagerName + "'");
+                System.out.println("  dataLength         = " + msg.getDataLength() + " bytes");
+
                 MQPutMessageOptions pmo = new MQPutMessageOptions();
                 pmo.options = MQConstants.MQPMO_NO_SYNCPOINT | MQConstants.MQPMO_FAIL_IF_QUIESCING;
                 queue.put(msg, pmo);
+
+                System.out.println("  messageId (after)  = " + HEX.formatHex(msg.messageId));
+                System.out.println("  → put returned without exception");
 
                 return HEX.formatHex(msg.messageId);
             } finally {
