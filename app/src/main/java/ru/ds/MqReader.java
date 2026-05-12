@@ -24,54 +24,62 @@ public class MqReader {
     }
 
     public int purge(String queueName) throws MQException {
-        int openOptions = MQConstants.MQOO_INPUT_AS_Q_DEF | MQConstants.MQOO_FAIL_IF_QUIESCING;
-        MQQueue queue = qMgr.accessQueue(queueName, openOptions);
-        try {
-            MQGetMessageOptions gmo = new MQGetMessageOptions();
-            gmo.options = MQConstants.MQGMO_NO_WAIT
-                    | MQConstants.MQGMO_NO_SYNCPOINT
-                    | MQConstants.MQGMO_FAIL_IF_QUIESCING;
+        synchronized (qMgr) {
+            int openOptions = MQConstants.MQOO_INPUT_AS_Q_DEF | MQConstants.MQOO_FAIL_IF_QUIESCING;
+            MQQueue queue = qMgr.accessQueue(queueName, openOptions);
+            try {
+                MQGetMessageOptions gmo = new MQGetMessageOptions();
+                gmo.options = MQConstants.MQGMO_NO_WAIT
+                        | MQConstants.MQGMO_NO_SYNCPOINT
+                        | MQConstants.MQGMO_FAIL_IF_QUIESCING;
 
-            int count = 0;
-            while (true) {
-                MQMessage msg = new MQMessage();
-                try {
-                    queue.get(msg, gmo);
-                    count++;
-                } catch (MQException e) {
-                    if (e.reasonCode == MQConstants.MQRC_NO_MSG_AVAILABLE) break;
-                    throw e;
+                int count = 0;
+                while (true) {
+                    MQMessage msg = new MQMessage();
+                    try {
+                        queue.get(msg, gmo);
+                        count++;
+                    } catch (MQException e) {
+                        if (e.reasonCode == MQConstants.MQRC_NO_MSG_AVAILABLE) break;
+                        throw e;
+                    }
                 }
+                return count;
+            } finally {
+                queue.close();
             }
-            return count;
-        } finally {
-            queue.close();
         }
     }
 
     public List<MessageDto> browseAll(String queueName) throws MQException, IOException {
-        int openOptions = MQConstants.MQOO_BROWSE | MQConstants.MQOO_FAIL_IF_QUIESCING;
-        MQQueue queue = qMgr.accessQueue(queueName, openOptions);
-        try {
-            MQGetMessageOptions gmo = new MQGetMessageOptions();
-            gmo.options = MQConstants.MQGMO_BROWSE_FIRST | MQConstants.MQGMO_FAIL_IF_QUIESCING;
-            gmo.matchOptions = MQConstants.MQMO_NONE;
+        synchronized (qMgr) {
+            int openOptions = MQConstants.MQOO_BROWSE | MQConstants.MQOO_FAIL_IF_QUIESCING;
+            MQQueue queue = qMgr.accessQueue(queueName, openOptions);
+            try {
+                MQGetMessageOptions gmo = new MQGetMessageOptions();
+                gmo.options = MQConstants.MQGMO_BROWSE_FIRST
+                        | MQConstants.MQGMO_NO_WAIT
+                        | MQConstants.MQGMO_FAIL_IF_QUIESCING;
+                gmo.matchOptions = MQConstants.MQMO_NONE;
 
-            List<MessageDto> result = new ArrayList<>();
-            while (true) {
-                MQMessage msg = new MQMessage();
-                try {
-                    queue.get(msg, gmo);
-                } catch (MQException e) {
-                    if (e.reasonCode == MQConstants.MQRC_NO_MSG_AVAILABLE) break;
-                    throw e;
+                List<MessageDto> result = new ArrayList<>();
+                while (true) {
+                    MQMessage msg = new MQMessage();
+                    try {
+                        queue.get(msg, gmo);
+                    } catch (MQException e) {
+                        if (e.reasonCode == MQConstants.MQRC_NO_MSG_AVAILABLE) break;
+                        throw e;
+                    }
+                    result.add(toDto(msg));
+                    gmo.options = MQConstants.MQGMO_BROWSE_NEXT
+                            | MQConstants.MQGMO_NO_WAIT
+                            | MQConstants.MQGMO_FAIL_IF_QUIESCING;
                 }
-                result.add(toDto(msg));
-                gmo.options = MQConstants.MQGMO_BROWSE_NEXT | MQConstants.MQGMO_FAIL_IF_QUIESCING;
+                return result;
+            } finally {
+                queue.close();
             }
-            return result;
-        } finally {
-            queue.close();
         }
     }
 
