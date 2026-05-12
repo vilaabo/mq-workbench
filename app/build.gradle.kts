@@ -23,7 +23,10 @@ dependencies {
 
     implementation("com.ibm.mq:com.ibm.mq.allclient:9.3.4.0")
 
-    implementation("io.github.cdimascio:dotenv-java:3.0.0")
+    // HTTP API
+    implementation("io.javalin:javalin:6.3.0")
+    implementation("com.fasterxml.jackson.core:jackson-databind:2.17.2")
+    implementation("org.slf4j:slf4j-simple:2.0.13")
 
     // This dependency is used by the application.
     implementation(libs.guava)
@@ -38,7 +41,7 @@ java {
 
 application {
     // Define the main class for the application.
-    mainClass = "org.example.App"
+    mainClass = "ru.ds.MqApi"
 }
 
 tasks.named<Test>("test") {
