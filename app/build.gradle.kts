@@ -8,6 +8,7 @@
 plugins {
     // Apply the application plugin to add support for building a CLI application in Java.
     application
+    id("com.gradleup.shadow") version "8.3.5"
 }
 
 repositories {
@@ -47,4 +48,13 @@ application {
 tasks.named<Test>("test") {
     // Use JUnit Platform for unit tests.
     useJUnitPlatform()
+}
+
+tasks.shadowJar {
+    archiveFileName.set("ibm-mq-api.jar")
+    mergeServiceFiles()
+    // IBM MQ jars are signed; their signature files become invalid after merging.
+    exclude("META-INF/*.SF")
+    exclude("META-INF/*.DSA")
+    exclude("META-INF/*.RSA")
 }

@@ -33,6 +33,24 @@ gradle run --args="--host=localhost --port=1414 --channel=DEV.ADMIN.SVRCONN --qm
 
 При старте сервис подключается к Queue Manager один раз и держит соединение всё время своей жизни. Каждое сообщение/операция открывает свою `MQQueue` (поток-безопасно).
 
+## Сборка fat jar
+
+Для деплоя проект собирается в один исполняемый JAR со всеми зависимостями через плагин [Shadow](https://gradleup.com/shadow/):
+
+```bash
+./gradlew shadowJar
+```
+
+Результат: `app/build/libs/ibm-mq-api.jar` (~26 МБ — основной вес даёт `com.ibm.mq.allclient`). При сборке исключаются signature-файлы IBM MQ jar-ов (`META-INF/*.SF/.DSA/.RSA`) — без этого JRE отказался бы запускать собранный jar из-за невалидных подписей.
+
+Запуск собранного jar:
+
+```bash
+java -jar app/build/libs/ibm-mq-api.jar \
+  --host=localhost --port=1414 \
+  --channel=DEV.ADMIN.SVRCONN --qmgr=QM1
+```
+
 ## API
 
 База: `http://localhost:{api-port}` (по умолчанию `8080`).
