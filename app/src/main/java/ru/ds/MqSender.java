@@ -40,7 +40,7 @@ public class MqSender {
                 msg.writeString(text);
 
                 MQPutMessageOptions pmo = new MQPutMessageOptions();
-                pmo.options = MQConstants.MQPMO_FAIL_IF_QUIESCING;
+                pmo.options = MQConstants.MQPMO_NO_SYNCPOINT | MQConstants.MQPMO_FAIL_IF_QUIESCING;
                 queue.put(msg, pmo);
 
                 return HEX.formatHex(msg.messageId);
