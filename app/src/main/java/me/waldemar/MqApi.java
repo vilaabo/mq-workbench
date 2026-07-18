@@ -13,6 +13,14 @@ import io.javalin.Javalin;
 import io.javalin.http.Context;
 import io.javalin.http.HttpStatus;
 import io.javalin.json.JavalinJackson;
+import io.javalin.openapi.HttpMethod;
+import io.javalin.openapi.OpenApi;
+import io.javalin.openapi.OpenApiContent;
+import io.javalin.openapi.OpenApiParam;
+import io.javalin.openapi.OpenApiRequestBody;
+import io.javalin.openapi.OpenApiResponse;
+import io.javalin.openapi.plugin.OpenApiPlugin;
+import io.javalin.openapi.plugin.swagger.SwaggerPlugin;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -42,6 +50,14 @@ public class MqApi {
     private static final ObjectMapper HEADER_JSON =
             JsonMapper.builder().enable(JsonWriteFeature.ESCAPE_NON_ASCII).build();
 
+    private final AppConfig cfg;
+    private final MqService mq;
+
+    MqApi(AppConfig cfg, MqService mq) {
+        this.cfg = cfg;
+        this.mq = mq;
+    }
+
     public static void main(String[] args) {
         AppConfig cfg;
         try {
@@ -56,100 +72,37 @@ public class MqApi {
             return;
         }
 
-        MqService mq = new MqService(new MqConnectionFactory(cfg));
+        MqApi api = new MqApi(cfg, new MqService(new MqConnectionFactory(cfg)));
 
         Javalin app = Javalin.create(config -> {
             config.showJavalinBanner = false;
             config.useVirtualThreads = true; // RPC блокирует поток до 300 с — Loom делает это дешёвым
             config.http.maxRequestSize = 32L * 1024 * 1024;
             config.jsonMapper(new JavalinJackson().updateMapper(m -> m.enable(SerializationFeature.INDENT_OUTPUT)));
+            config.registerPlugin(new OpenApiPlugin(openApi -> openApi
+                    .withDocumentationPath("/openapi.json")
+                    .withDefinitionConfiguration((version, definition) -> definition
+                            .withInfo(info -> {
+                                info.setTitle("mq-workbench");
+                                info.setVersion("1.1.0");
+                                info.setDescription("HTTP workbench for IBM MQ queues: browse, put, get, purge "
+                                        + "and synchronous request-reply. Message body = HTTP body, "
+                                        + "MQMD/RFH2 metadata = X-MQ-* headers.");
+                            }))));
+            config.registerPlugin(new SwaggerPlugin(swagger -> {
+                swagger.setDocumentationPath("/openapi.json");
+                swagger.setUiPath("/swagger");
+            }));
         });
 
-        app.get("/health", ctx -> {
-            mq.ping();
-            ctx.json(Map.of("status", "ok", "qmgr", cfg.qmgr(), "host", cfg.host() + ":" + cfg.port()));
-        });
-
-        app.get("/queues/{queue}", ctx -> {
-            String queue = ctx.pathParam("queue");
-            MqService.QueueInfo info = mq.queueInfo(queue);
-            ctx.json(new QueueInfoResponse(queue, info.depth(), info.maxDepth(), info.maxMessageLength(),
-                    info.openInputCount(), info.openOutputCount(), info.getInhibited(), info.putInhibited()));
-        });
-
-        app.get("/queues/{queue}/messages", ctx -> {
-            String queue = ctx.pathParam("queue");
-            int limit = intQuery(ctx, "limit", DEFAULT_BROWSE_LIMIT, 1, MAX_BROWSE_LIMIT);
-            MqService.BrowseResult r = mq.browse(queue, limit);
-            List<MessageSummary> messages = new ArrayList<>(r.messages().size());
-            for (StoredMessage m : r.messages()) messages.add(toSummary(m));
-            ctx.json(new BrowseResponse(queue, r.depth(), messages.size(), r.moreAvailable(), messages));
-            log.info("BROWSE {}: {} из {}", queue, messages.size(), r.depth());
-        });
-
-        app.post("/queues/{queue}/messages", ctx -> {
-            String queue = ctx.pathParam("queue");
-            PutOptions opts = parsePutOptions(ctx);
-            byte[] body = requestBodyBytes(ctx, opts);
-            MqService.PutResult r = mq.put(queue, Messages.build(body, opts));
-            ctx.status(HttpStatus.CREATED);
-            ctx.json(new PutResponse(queue, Messages.hex(r.messageId()), Messages.hex(r.correlationId())));
-            log.info("PUT {}: msgId={}", queue, Messages.hex(r.messageId()));
-        });
-
-        app.get("/queues/{queue}/messages/{messageId}", ctx -> {
-            StoredMessage m = mq.getByMessageId(ctx.pathParam("queue"),
-                    parseId(ctx.pathParam("messageId")), false);
-            respondMessage(ctx, m);
-        });
-
-        app.delete("/queues/{queue}/messages/{messageId}", ctx -> {
-            String queue = ctx.pathParam("queue");
-            StoredMessage m = mq.getByMessageId(queue, parseId(ctx.pathParam("messageId")), true);
-            respondMessage(ctx, m);
-            log.info("GET(destructive) {}: msgId={}", queue, Messages.hex(m.messageId()));
-        });
-
-        app.delete("/queues/{queue}/messages", ctx -> {
-            String queue = ctx.pathParam("queue");
-            MqService.PurgeResult r = mq.purge(queue);
-            ctx.json(new PurgeResponse(queue, r.purged(), r.remaining()));
-            log.info("PURGE {}: purged={} remaining={}", queue, r.purged(), r.remaining());
-        });
-
-        app.post("/rpc", ctx -> {
-            String requestQueue = requireQuery(ctx, "requestQueue");
-            String replyQueue = requireQuery(ctx, "replyQueue");
-            int timeout = intQuery(ctx, "timeoutSeconds", DEFAULT_RPC_TIMEOUT_SECONDS, 1, MAX_RPC_TIMEOUT_SECONDS);
-            String correlation = ctx.queryParam("correlation");
-            boolean byCorrelId = "corrId".equalsIgnoreCase(correlation);
-            if (correlation != null && !byCorrelId && !"msgId".equalsIgnoreCase(correlation)) {
-                throw new BadInput("correlation должен быть msgId (стандарт: CorrelId ответа = MsgId запроса) или corrId (passthrough)");
-            }
-            PutOptions opts = parsePutOptions(ctx);
-            if (byCorrelId && opts.correlationId() == null) {
-                throw new BadInput("correlation=corrId требует заголовок X-MQ-Correlation-Id");
-            }
-            byte[] body = requestBodyBytes(ctx, opts);
-            MQMessage request = Messages.build(body, opts);
-            if (opts.replyToQueue() == null) request.replyToQueueName = replyQueue;
-            if (opts.messageType() == null) request.messageType = MQConstants.MQMT_REQUEST;
-
-            MqService.RpcResult r = mq.rpc(requestQueue, replyQueue, request, byCorrelId, timeout);
-            ctx.header("X-MQ-Request-Message-Id", Messages.hex(r.requestMessageId()));
-            if (r.reply() == null) {
-                ctx.status(HttpStatus.GATEWAY_TIMEOUT);
-                ctx.json(new ErrorResponse("RPC timeout",
-                        "Ответ с CorrelId=" + Messages.hex(r.correlationUsed())
-                                + " не появился в " + replyQueue + " за " + timeout + " с "
-                                + "(запрос уже лежит в " + requestQueue + ", msgId=" + Messages.hex(r.requestMessageId()) + ")",
-                        null, null, null));
-                log.info("RPC {} -> {}: таймаут {} с", requestQueue, replyQueue, timeout);
-                return;
-            }
-            respondMessage(ctx, r.reply());
-            log.info("RPC {} -> {}: ответ msgId={}", requestQueue, replyQueue, Messages.hex(r.reply().messageId()));
-        });
+        app.get("/health", api::health);
+        app.get("/queues/{queue}", api::queueInfo);
+        app.get("/queues/{queue}/messages", api::browse);
+        app.post("/queues/{queue}/messages", api::put);
+        app.get("/queues/{queue}/messages/{messageId}", api::getMessage);
+        app.delete("/queues/{queue}/messages/{messageId}", api::consumeMessage);
+        app.delete("/queues/{queue}/messages", api::purge);
+        app.post("/rpc", api::rpc);
 
         app.exception(BadInput.class, (e, ctx) -> {
             ctx.status(HttpStatus.BAD_REQUEST);
@@ -179,6 +132,7 @@ public class MqApi {
 
         log.info("MQ HTTP API: {} @ {}:{} (канал {}), API-порт {}",
                 cfg.qmgr(), cfg.host(), cfg.port(), cfg.channel(), cfg.apiPort());
+        log.info("  Swagger UI: http://localhost:{}/swagger (спека: /openapi.json)", cfg.apiPort());
         log.info("  GET    /health");
         log.info("  GET    /queues/{{queue}}                     — атрибуты очереди (глубина и т.д.)");
         log.info("  GET    /queues/{{queue}}/messages?limit=200  — browse без удаления");
@@ -187,6 +141,259 @@ public class MqApi {
         log.info("  DELETE /queues/{{queue}}/messages/{{msgId}}  — забрать одно сообщение (destructive)");
         log.info("  DELETE /queues/{{queue}}/messages            — очистить очередь");
         log.info("  POST   /rpc?requestQueue=A&replyQueue=B      — запрос-ответ одним вызовом");
+    }
+
+    // ---------- хендлеры ----------
+
+    @OpenApi(
+            path = "/health",
+            methods = HttpMethod.GET,
+            summary = "Проверка соединения с queue manager",
+            tags = "service",
+            responses = {
+                    @OpenApiResponse(status = "200", description = "Соединение установлено"),
+                    @OpenApiResponse(status = "502", description = "Queue manager недоступен",
+                            content = @OpenApiContent(from = ErrorResponse.class))
+            })
+    private void health(Context ctx) throws MQException, IOException {
+        mq.ping();
+        ctx.json(Map.of("status", "ok", "qmgr", cfg.qmgr(), "host", cfg.host() + ":" + cfg.port()));
+    }
+
+    @OpenApi(
+            path = "/queues/{queue}",
+            methods = HttpMethod.GET,
+            summary = "Атрибуты очереди",
+            description = "Глубина, лимиты, счётчики открытий, inhibit-флаги. Только локальные очереди "
+                    + "(remote/alias дают 400).",
+            tags = "queues",
+            pathParams = @OpenApiParam(name = "queue", description = "Имя очереди", required = true),
+            responses = {
+                    @OpenApiResponse(status = "200", content = @OpenApiContent(from = QueueInfoResponse.class)),
+                    @OpenApiResponse(status = "404", description = "Нет такой очереди",
+                            content = @OpenApiContent(from = ErrorResponse.class))
+            })
+    private void queueInfo(Context ctx) throws MQException, IOException {
+        String queue = ctx.pathParam("queue");
+        MqService.QueueInfo info = mq.queueInfo(queue);
+        ctx.json(new QueueInfoResponse(queue, info.depth(), info.maxDepth(), info.maxMessageLength(),
+                info.openInputCount(), info.openOutputCount(), info.getInhibited(), info.putInhibited()));
+    }
+
+    @OpenApi(
+            path = "/queues/{queue}/messages",
+            methods = HttpMethod.GET,
+            summary = "Browse очереди без удаления сообщений",
+            description = "MQMD-поля, RFH2/JMS-свойства (properties) и превью тел. Тела ограничены 256 КБ "
+                    + "на сообщение (bodyTruncated) и 64 МБ на ответ; порядок — как отдаёт MQ "
+                    + "(при MSGDLVSQ(PRIORITY) приоритетные раньше).",
+            tags = "messages",
+            pathParams = @OpenApiParam(name = "queue", description = "Имя очереди", required = true),
+            queryParams = @OpenApiParam(name = "limit", type = Integer.class,
+                    description = "Максимум сообщений в ответе (1..1000, дефолт 200)"),
+            responses = {
+                    @OpenApiResponse(status = "200", content = @OpenApiContent(from = BrowseResponse.class)),
+                    @OpenApiResponse(status = "404", description = "Нет такой очереди",
+                            content = @OpenApiContent(from = ErrorResponse.class))
+            })
+    private void browse(Context ctx) throws MQException, IOException {
+        String queue = ctx.pathParam("queue");
+        int limit = intQuery(ctx, "limit", DEFAULT_BROWSE_LIMIT, 1, MAX_BROWSE_LIMIT);
+        MqService.BrowseResult r = mq.browse(queue, limit);
+        List<MessageSummary> messages = new ArrayList<>(r.messages().size());
+        for (StoredMessage m : r.messages()) messages.add(toSummary(m));
+        ctx.json(new BrowseResponse(queue, r.depth(), messages.size(), r.moreAvailable(), messages));
+        log.info("BROWSE {}: {} из {}", queue, messages.size(), r.depth());
+    }
+
+    @OpenApi(
+            path = "/queues/{queue}/messages",
+            methods = HttpMethod.POST,
+            summary = "Положить сообщение в очередь",
+            description = "Тело запроса → тело сообщения (текст перекодируется в X-MQ-Character-Set, "
+                    + "application/octet-stream или X-MQ-Format: NONE — байты как есть). "
+                    + "usr-свойства RFH2 задаются заголовками X-MQ-Usr-<имя> или X-MQ-Properties "
+                    + "(JSON-объект; сохраняет регистр имён — предпочтителен для автоматизации). "
+                    + "Ключи с точкой (jms.Dst) уходят в родные папки RFH2.",
+            tags = "messages",
+            pathParams = @OpenApiParam(name = "queue", description = "Имя очереди", required = true),
+            headers = {
+                    @OpenApiParam(name = "X-MQ-Message-Type",
+                            description = "DATAGRAM (дефолт) / REQUEST / REPLY / REPORT или число"),
+                    @OpenApiParam(name = "X-MQ-Format", description = "Формат тела (до 8 символов; NONE = бинарь), дефолт MQSTR"),
+                    @OpenApiParam(name = "X-MQ-Character-Set", type = Integer.class, description = "CCSID тела, дефолт 1208"),
+                    @OpenApiParam(name = "X-MQ-Encoding", type = Integer.class, description = "MQMD Encoding"),
+                    @OpenApiParam(name = "X-MQ-Message-Id", description = "hex до 48 символов"),
+                    @OpenApiParam(name = "X-MQ-Correlation-Id", description = "hex до 48 символов"),
+                    @OpenApiParam(name = "X-MQ-Reply-To-Queue", description = "MQMD ReplyToQ (обязателен для REQUEST)"),
+                    @OpenApiParam(name = "X-MQ-Reply-To-Queue-Manager", description = "MQMD ReplyToQMgr"),
+                    @OpenApiParam(name = "X-MQ-Priority", type = Integer.class, description = "0–9"),
+                    @OpenApiParam(name = "X-MQ-Persistence", type = Integer.class, description = "0 / 1 / 2"),
+                    @OpenApiParam(name = "X-MQ-Expiry", type = Integer.class,
+                            description = "Десятые доли секунды, -1 = безлимит"),
+                    @OpenApiParam(name = "X-MQ-Properties",
+                            description = "usr-свойства одним JSON-объектом: {\"operation\":\"CreateOrder\"}")
+            },
+            requestBody = @OpenApiRequestBody(description = "Тело сообщения как есть (JSON/XML/текст/бинарь)",
+                    content = {
+                            @OpenApiContent(mimeType = "application/json", type = "object"),
+                            @OpenApiContent(mimeType = "application/xml", type = "string"),
+                            @OpenApiContent(mimeType = "text/plain", type = "string"),
+                            @OpenApiContent(mimeType = "application/octet-stream", type = "string", format = "binary")
+                    }),
+            responses = {
+                    @OpenApiResponse(status = "201", content = @OpenApiContent(from = PutResponse.class)),
+                    @OpenApiResponse(status = "400", description = "Невалидные заголовки",
+                            content = @OpenApiContent(from = ErrorResponse.class)),
+                    @OpenApiResponse(status = "413", description = "Сообщение больше MAXMSGL очереди/канала",
+                            content = @OpenApiContent(from = ErrorResponse.class))
+            })
+    private void put(Context ctx) throws MQException, IOException {
+        String queue = ctx.pathParam("queue");
+        PutOptions opts = parsePutOptions(ctx);
+        byte[] body = requestBodyBytes(ctx, opts);
+        MqService.PutResult r = mq.put(queue, Messages.build(body, opts));
+        ctx.status(HttpStatus.CREATED);
+        ctx.json(new PutResponse(queue, Messages.hex(r.messageId()), Messages.hex(r.correlationId())));
+        log.info("PUT {}: msgId={}", queue, Messages.hex(r.messageId()));
+    }
+
+    @OpenApi(
+            path = "/queues/{queue}/messages/{messageId}",
+            methods = HttpMethod.GET,
+            summary = "Одно сообщение по MsgId, без удаления",
+            description = "Тело сообщения — телом ответа (текст перекодируется в UTF-8; ?raw=true — байты "
+                    + "без перекодировки). MQMD и свойства — в заголовках ответа X-MQ-* "
+                    + "(X-MQ-Message-Id, X-MQ-Correlation-Id, X-MQ-Format, X-MQ-Usr-<имя>, X-MQ-Properties и др.).",
+            tags = "messages",
+            pathParams = {
+                    @OpenApiParam(name = "queue", description = "Имя очереди", required = true),
+                    @OpenApiParam(name = "messageId", description = "MsgId в hex (48 символов)", required = true)
+            },
+            queryParams = @OpenApiParam(name = "raw", type = Boolean.class,
+                    description = "true — тело без перекодировки, application/octet-stream"),
+            responses = {
+                    @OpenApiResponse(status = "200", description = "Тело сообщения; метаданные в X-MQ-* заголовках",
+                            content = @OpenApiContent(mimeType = "*/*")),
+                    @OpenApiResponse(status = "404", description = "Нет сообщения с таким MsgId",
+                            content = @OpenApiContent(from = ErrorResponse.class))
+            })
+    private void getMessage(Context ctx) throws MQException, IOException {
+        StoredMessage m = mq.getByMessageId(ctx.pathParam("queue"),
+                parseId(ctx.pathParam("messageId")), false);
+        respondMessage(ctx, m);
+    }
+
+    @OpenApi(
+            path = "/queues/{queue}/messages/{messageId}",
+            methods = HttpMethod.DELETE,
+            summary = "Забрать одно сообщение по MsgId (destructive get)",
+            description = "Ответ — само сообщение, в том же виде, что и GET; сообщение удаляется из очереди.",
+            tags = "messages",
+            pathParams = {
+                    @OpenApiParam(name = "queue", description = "Имя очереди", required = true),
+                    @OpenApiParam(name = "messageId", description = "MsgId в hex (48 символов)", required = true)
+            },
+            queryParams = @OpenApiParam(name = "raw", type = Boolean.class,
+                    description = "true — тело без перекодировки, application/octet-stream"),
+            responses = {
+                    @OpenApiResponse(status = "200", description = "Забранное сообщение",
+                            content = @OpenApiContent(mimeType = "*/*")),
+                    @OpenApiResponse(status = "404", description = "Нет сообщения с таким MsgId",
+                            content = @OpenApiContent(from = ErrorResponse.class))
+            })
+    private void consumeMessage(Context ctx) throws MQException, IOException {
+        String queue = ctx.pathParam("queue");
+        StoredMessage m = mq.getByMessageId(queue, parseId(ctx.pathParam("messageId")), true);
+        respondMessage(ctx, m);
+        log.info("GET(destructive) {}: msgId={}", queue, Messages.hex(m.messageId()));
+    }
+
+    @OpenApi(
+            path = "/queues/{queue}/messages",
+            methods = HttpMethod.DELETE,
+            summary = "Очистить очередь",
+            description = "Destructive get всех сообщений без передачи тел по сети (truncated get). "
+                    + "Число итераций ограничено глубиной на момент старта; докинутое во время очистки "
+                    + "видно в remaining.",
+            tags = "messages",
+            pathParams = @OpenApiParam(name = "queue", description = "Имя очереди", required = true),
+            responses = {
+                    @OpenApiResponse(status = "200", content = @OpenApiContent(from = PurgeResponse.class)),
+                    @OpenApiResponse(status = "409", description = "Очередь занята (exclusive) или get запрещён",
+                            content = @OpenApiContent(from = ErrorResponse.class))
+            })
+    private void purge(Context ctx) throws MQException, IOException {
+        String queue = ctx.pathParam("queue");
+        MqService.PurgeResult r = mq.purge(queue);
+        ctx.json(new PurgeResponse(queue, r.purged(), r.remaining()));
+        log.info("PURGE {}: purged={} remaining={}", queue, r.purged(), r.remaining());
+    }
+
+    @OpenApi(
+            path = "/rpc",
+            methods = HttpMethod.POST,
+            summary = "Синхронный запрос-ответ через пару очередей",
+            description = "Кладёт сообщение (тело + X-MQ-* заголовки, как в POST /queues/{queue}/messages) "
+                    + "в requestQueue и ждёт скоррелированный ответ из replyQueue. ReplyToQ автоматически = "
+                    + "replyQueue, тип по умолчанию REQUEST. correlation=msgId (стандарт MQ): ответ ищется по "
+                    + "CorrelId = MsgId запроса; corrId (passthrough): по CorrelId запроса, требуется "
+                    + "X-MQ-Correlation-Id, запрос уходит с MQRO_PASS_CORREL_ID.",
+            tags = "rpc",
+            queryParams = {
+                    @OpenApiParam(name = "requestQueue", description = "Очередь запросов", required = true),
+                    @OpenApiParam(name = "replyQueue", description = "Очередь ответов", required = true),
+                    @OpenApiParam(name = "timeoutSeconds", type = Integer.class,
+                            description = "Ожидание ответа, 1..300 (дефолт 30)"),
+                    @OpenApiParam(name = "correlation", description = "msgId (дефолт) или corrId")
+            },
+            requestBody = @OpenApiRequestBody(description = "Тело запроса как есть",
+                    content = {
+                            @OpenApiContent(mimeType = "application/json", type = "object"),
+                            @OpenApiContent(mimeType = "application/xml", type = "string"),
+                            @OpenApiContent(mimeType = "text/plain", type = "string"),
+                            @OpenApiContent(mimeType = "application/octet-stream", type = "string", format = "binary")
+                    }),
+            responses = {
+                    @OpenApiResponse(status = "200",
+                            description = "Ответ интеграции: тело + X-MQ-* заголовки + X-MQ-Request-Message-Id",
+                            content = @OpenApiContent(mimeType = "*/*")),
+                    @OpenApiResponse(status = "504", description = "Ответ не пришёл за timeoutSeconds; "
+                            + "запрос уже лежит в requestQueue",
+                            content = @OpenApiContent(from = ErrorResponse.class))
+            })
+    private void rpc(Context ctx) throws MQException, IOException {
+        String requestQueue = requireQuery(ctx, "requestQueue");
+        String replyQueue = requireQuery(ctx, "replyQueue");
+        int timeout = intQuery(ctx, "timeoutSeconds", DEFAULT_RPC_TIMEOUT_SECONDS, 1, MAX_RPC_TIMEOUT_SECONDS);
+        String correlation = ctx.queryParam("correlation");
+        boolean byCorrelId = "corrId".equalsIgnoreCase(correlation);
+        if (correlation != null && !byCorrelId && !"msgId".equalsIgnoreCase(correlation)) {
+            throw new BadInput("correlation должен быть msgId (стандарт: CorrelId ответа = MsgId запроса) или corrId (passthrough)");
+        }
+        PutOptions opts = parsePutOptions(ctx);
+        if (byCorrelId && opts.correlationId() == null) {
+            throw new BadInput("correlation=corrId требует заголовок X-MQ-Correlation-Id");
+        }
+        byte[] body = requestBodyBytes(ctx, opts);
+        MQMessage request = Messages.build(body, opts);
+        if (opts.replyToQueue() == null) request.replyToQueueName = replyQueue;
+        if (opts.messageType() == null) request.messageType = MQConstants.MQMT_REQUEST;
+
+        MqService.RpcResult r = mq.rpc(requestQueue, replyQueue, request, byCorrelId, timeout);
+        ctx.header("X-MQ-Request-Message-Id", Messages.hex(r.requestMessageId()));
+        if (r.reply() == null) {
+            ctx.status(HttpStatus.GATEWAY_TIMEOUT);
+            ctx.json(new ErrorResponse("RPC timeout",
+                    "Ответ с CorrelId=" + Messages.hex(r.correlationUsed())
+                            + " не появился в " + replyQueue + " за " + timeout + " с "
+                            + "(запрос уже лежит в " + requestQueue + ", msgId=" + Messages.hex(r.requestMessageId()) + ")",
+                    null, null, null));
+            log.info("RPC {} -> {}: таймаут {} с", requestQueue, replyQueue, timeout);
+            return;
+        }
+        respondMessage(ctx, r.reply());
+        log.info("RPC {} -> {}: ответ msgId={}", requestQueue, replyQueue, Messages.hex(r.reply().messageId()));
     }
 
     // ---------- разбор запроса ----------

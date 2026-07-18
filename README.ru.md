@@ -18,6 +18,7 @@ HTTP-верстак для очередей **IBM MQ**: browse, put, get, purge 
 - Разбор цепочек заголовков: RFH2 (включая RFH2→RFH2) и MQDLH (в dead-letter очереди видна причина как `dlh.Reason`)
 - Stateless: соединение с MQ на каждый запрос — обрыв сети или рестарт менеджера очередей не требуют рестарта сервиса
 - Ошибки MQ маппятся на честные HTTP-статусы с символьными именами кодов (`MQRC_UNKNOWN_OBJECT_NAME` → 404)
+- **Swagger UI** на `/swagger` (спека OpenAPI 3.0 — на `/openapi.json`) — можно смотреть и дёргать все эндпоинты прямо из браузера
 
 ## Быстрый старт
 
@@ -44,6 +45,8 @@ java -jar app/build/libs/mq-workbench.jar \
 | `--api-port` | `API_PORT` | нет | `8080` | Порт HTTP API |
 
 ## API
+
+Интерактивная документация: **`/swagger`** (Swagger UI, генерируется из аннотаций `@OpenApi` при сборке; машиночитаемая спека — `/openapi.json`).
 
 ### GET /health
 

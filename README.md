@@ -18,6 +18,7 @@ The API philosophy: **message body = HTTP body** (JSON, XML, binary — as is), 
 - Unwraps header chains: RFH2 (including RFH2→RFH2) and MQDLH (dead-letter queues show the reason as `dlh.Reason`)
 - Stateless: a fresh MQ connection per request — network drops or queue manager restarts never require a service restart
 - MQ errors mapped to honest HTTP statuses with symbolic reason names (`MQRC_UNKNOWN_OBJECT_NAME` → 404)
+- **Swagger UI** at `/swagger` (OpenAPI 3.0 spec at `/openapi.json`) — explore and call every endpoint straight from the browser
 
 ## Quick start
 
@@ -44,6 +45,8 @@ Configuration sources, in priority order: CLI arguments → environment variable
 | `--api-port` | `API_PORT` | no | `8080` | HTTP API port |
 
 ## API
+
+Interactive docs: **`/swagger`** (Swagger UI, generated from `@OpenApi` annotations at build time; machine-readable spec at `/openapi.json`).
 
 ### GET /health
 

@@ -29,6 +29,11 @@ dependencies {
     implementation("com.fasterxml.jackson.core:jackson-databind:2.17.2")
     implementation("org.slf4j:slf4j-simple:2.0.13")
 
+    // OpenAPI-спека генерируется annotation-процессором из @OpenApi на хендлерах; UI на /swagger
+    implementation("io.javalin.community.openapi:javalin-openapi-plugin:6.3.0")
+    implementation("io.javalin.community.openapi:javalin-swagger-plugin:6.3.0")
+    annotationProcessor("io.javalin.community.openapi:openapi-annotation-processor:6.3.0")
+
     // This dependency is used by the application.
     implementation(libs.guava)
 }
