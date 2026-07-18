@@ -1,4 +1,4 @@
-package ru.ds;
+package me.waldemar;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -27,6 +27,10 @@ public class MqArgs {
                 positional.add(a);
             }
         }
+    }
+
+    public String optional(String key) {
+        return values.get(key);
     }
 
     public String required(String key) {

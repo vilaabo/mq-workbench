@@ -10,5 +10,5 @@ plugins {
     id("org.gradle.toolchains.foojay-resolver-convention") version "1.0.0"
 }
 
-rootProject.name = "ibm-mq-reader-sender"
+rootProject.name = "mq-workbench"
 include("app")

@@ -187,3 +187,10 @@ Temporary Items
 *.icloud
 
 # End of https://www.toptal.com/developers/gitignore/api/java,intellij,macos
+
+# Claude Code artifacts
+.claude/
+
+# IBM MQ client trace logs
+mqjms.log*
+mq_dump.txt

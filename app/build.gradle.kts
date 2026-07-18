@@ -42,7 +42,7 @@ java {
 
 application {
     // Define the main class for the application.
-    mainClass = "ru.ds.MqApi"
+    mainClass = "me.waldemar.MqApi"
 }
 
 tasks.named<Test>("test") {
@@ -51,7 +51,7 @@ tasks.named<Test>("test") {
 }
 
 tasks.shadowJar {
-    archiveFileName.set("ibm-mq-api.jar")
+    archiveFileName.set("mq-workbench.jar")
     mergeServiceFiles()
     // IBM MQ jars are signed; their signature files become invalid after merging.
     exclude("META-INF/*.SF")

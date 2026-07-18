@@ -1,157 +1,165 @@
-# IBM MQ HTTP API
+# mq-workbench
 
-Небольшой HTTP-сервис на Java, который оборачивает IBM MQ-клиент: позволяет читать, отправлять и очищать очереди через REST-эндпоинты.
+**English** | [Русский](README.ru.md)
 
-## Стек
+HTTP workbench for **IBM MQ** queues: browse, put, get, purge and synchronous request-reply — from Postman, curl, or any HTTP client, on any OS. A cross-platform alternative to the classic Windows-only RFHUtil.
 
-- Java 21
-- Gradle (Kotlin DSL)
-- [Javalin 6](https://javalin.io/) — HTTP-сервер
-- Jackson — JSON-сериализация
-- IBM MQ Java client (`com.ibm.mq.allclient` 9.3.4.0)
+The API philosophy: **message body = HTTP body** (JSON, XML, binary — as is), **metadata (MQMD, RFH2) = `X-MQ-*` HTTP headers**.
 
-## Требования
+## Features
 
-- JDK 21
-- Доступный IBM MQ Queue Manager (хост, порт, channel, имя QM)
+- Browse queues without consuming messages, with RFH2/JMS properties and body previews
+- Put messages with full MQMD control and RFH2 `usr` properties (`X-MQ-Usr-*` / `X-MQ-Properties`)
+- Fetch or delete a single message by MsgId; purge a queue without transferring bodies over the network
+- **`POST /rpc`** — a full request-reply round-trip in one HTTP call: put to the request queue, wait for the correlated reply
+- Unwraps header chains: RFH2 (including RFH2→RFH2) and MQDLH (dead-letter queues show the reason as `dlh.Reason`)
+- Stateless: a fresh MQ connection per request — network drops or queue manager restarts never require a service restart
+- MQ errors mapped to honest HTTP statuses with symbolic reason names (`MQRC_UNKNOWN_OBJECT_NAME` → 404)
 
-## Запуск
+## Quick start
 
-Параметры подключения передаются как CLI-аргументы:
-
-```bash
-gradle run --args="--host=localhost --port=1414 --channel=DEV.ADMIN.SVRCONN --qmgr=QM1"
-```
-
-| Аргумент | Обязательный | Дефолт | Описание |
-|---|---|---|---|
-| `--host` | да | — | Хост Queue Manager |
-| `--port` | да | — | Порт listener-а |
-| `--channel` | да | — | Server connection channel |
-| `--qmgr` | да | — | Имя Queue Manager |
-| `--api-port` | нет | `8080` | Порт HTTP API |
-
-При старте сервис подключается к Queue Manager один раз и держит соединение всё время своей жизни. Каждое сообщение/операция открывает свою `MQQueue` (поток-безопасно).
-
-## Сборка fat jar
-
-Для деплоя проект собирается в один исполняемый JAR со всеми зависимостями через плагин [Shadow](https://gradleup.com/shadow/):
+Requires JDK 21.
 
 ```bash
 ./gradlew shadowJar
-```
-
-Результат: `app/build/libs/ibm-mq-api.jar` (~26 МБ — основной вес даёт `com.ibm.mq.allclient`). При сборке исключаются signature-файлы IBM MQ jar-ов (`META-INF/*.SF/.DSA/.RSA`) — без этого JRE отказался бы запускать собранный jar из-за невалидных подписей.
-
-Запуск собранного jar:
-
-```bash
-java -jar app/build/libs/ibm-mq-api.jar \
+java -jar app/build/libs/mq-workbench.jar \
   --host=localhost --port=1414 \
-  --channel=DEV.ADMIN.SVRCONN --qmgr=QM1
+  --channel=DEV.APP.SVRCONN --qmgr=QM1 \
+  --user=app --password=passw0rd
 ```
+
+Configuration sources, in priority order: CLI arguments → environment variables → `.env` file in the working directory (see [.env.example](.env.example)):
+
+| CLI | Env var | Required | Default | Description |
+|---|---|---|---|---|
+| `--host` | `MQ_HOST` | yes | — | Queue manager host |
+| `--port` | `MQ_PORT` | yes | — | Listener port |
+| `--channel` | `MQ_CHANNEL` | yes | — | Server connection channel |
+| `--qmgr` | `MQ_QMGR` | yes | — | Queue manager name |
+| `--user` | `MQ_USER` | no | — | User (enables MQCSP authentication) |
+| `--password` | `MQ_PASSWORD` | no | — | Password |
+| `--api-port` | `API_PORT` | no | `8080` | HTTP API port |
 
 ## API
 
-База: `http://localhost:{api-port}` (по умолчанию `8080`).
-Имя очереди передаётся в URL: `{queue}` — например `DEV.QUEUE.1`.
+### GET /health
 
-### GET /messages/{queue}
+Checks the MQ connection. `200 {"status":"ok",...}` or `502` with the MQ reason code.
 
-Просмотр всех сообщений в очереди **без удаления** (browse). Можно вызывать сколько угодно раз — состояние очереди не меняется.
+### GET /queues/{queue}
 
-Ответ:
+Queue attributes: `depth`, `maxDepth`, `maxMessageLength`, `openInputCount`, `openOutputCount`, `getInhibited`, `putInhibited`.
 
-```json
-{
-  "queue": "DEV.QUEUE.1",
-  "count": 1,
-  "messages": [
-    {
-      "messageId": "414D5120514D31...",
-      "correlationId": "0000000000...",
-      "messageType": 2,
-      "messageTypeText": "REPLY",
-      "format": "MQSTR",
-      "characterSet": 1208,
-      "encoding": 273,
-      "priority": 0,
-      "persistence": 0,
-      "putDateTime": "2026-05-12T20:30:45Z",
-      "replyToQueue": "",
-      "replyToQueueManager": "",
-      "userId": "app",
-      "putApplicationName": "MqSender",
-      "messageLength": 25,
-      "text": { "orderId": 42, "items": ["a", "b"] }
-    }
-  ]
-}
-```
+### GET /queues/{queue}/messages?limit=200
 
-Поле `text` парсится как JSON-объект (так как сервис рассчитан на JSON-payload). Если содержимое сообщения не распарсилось как JSON — возвращается строкой.
+Non-destructive browse. Returns `queue`, `depth`, `returned`, `moreAvailable` and `messages[]` — MQMD fields, `properties`, and `bodyPreview` (first 2000 chars of text; `null` for binary bodies) per message.
 
-### POST /messages/{queue}
+Bodies are capped at 256 KB per message (`bodyTruncated` flag) and 64 MB per response — a deep queue cannot exhaust the service. The full body is served by the single-message endpoint.
 
-Положить JSON-сообщение в очередь. Тело запроса — payload (валидный JSON). Параметры MQMD передаются через опциональные HTTP-заголовки `X-MQ-*`.
+### GET /queues/{queue}/messages/{msgId}
 
-| Заголовок | Тип | Дефолт | Назначение |
-|---|---|---|---|
-| `X-MQ-Message-Type` | `REPLY` / `REQUEST` / `DATAGRAM` / `REPORT` или число | `REPLY` (2) | MQMD MsgType |
-| `X-MQ-Format` | строка до 8 символов | `MQSTR` | MQMD Format |
-| `X-MQ-Character-Set` | число (CCSID) | `1208` (UTF-8) | MQMD CodedCharSetId |
-| `X-MQ-Encoding` | число | платформенный | MQMD Encoding |
-| `X-MQ-Correlation-Id` | hex-строка | нули | MQMD CorrelId |
-| `X-MQ-Message-Id` | hex-строка | сгенерирует MQ | MQMD MsgId |
-| `X-MQ-Reply-To-Queue` | строка | пусто | MQMD ReplyToQ |
-| `X-MQ-Reply-To-Queue-Manager` | строка | пусто | MQMD ReplyToQMgr |
-| `X-MQ-Priority` | число (0–9) | из определения очереди | MQMD Priority |
-| `X-MQ-Persistence` | `0` или `1` | из определения очереди | MQMD Persistence |
-| `X-MQ-Expiry` | число (в десятых долях секунды, `-1` = безлимит) | безлимит | MQMD Expiry |
-
-Пример:
+One message by MsgId (hex), **without consuming it**. The message body is the response body (text is re-encoded to UTF-8, `Content-Type` sniffed from content; binary comes as `application/octet-stream`; `?raw=true` skips re-encoding). Metadata comes as response headers:
 
 ```
-POST /messages/DEV.QUEUE.1
-Content-Type: application/json
-X-MQ-Message-Type: REPLY
-X-MQ-Correlation-Id: 414D5120514D31202020202020202020A1B2C3D4
-X-MQ-Reply-To-Queue: DEV.REPLY.Q
-X-MQ-Priority: 5
-
-{ "orderId": 42, "status": "OK" }
+X-MQ-Message-Id, X-MQ-Correlation-Id, X-MQ-Message-Type, X-MQ-Format (body format),
+X-MQ-Mqmd-Format, X-MQ-Character-Set, X-MQ-Encoding, X-MQ-Priority, X-MQ-Persistence,
+X-MQ-Expiry, X-MQ-Put-DateTime, X-MQ-Reply-To-Queue, X-MQ-Reply-To-Queue-Manager,
+X-MQ-User-Id, X-MQ-Put-Appl-Name, X-MQ-Usr-<name> (each usr property),
+X-MQ-Properties (all properties as one JSON object)
 ```
 
-Ответ (`201 Created`):
+### DELETE /queues/{queue}/messages/{msgId}
 
-```json
-{ "queue": "DEV.QUEUE.1", "messageId": "414D5120..." }
+Same, but the message is **consumed** (destructive get). The response is the message itself.
+
+### POST /queues/{queue}/messages
+
+Put a message. Request body → message body:
+
+- text (JSON/XML/plain) is transcoded from the request charset into the target CCSID (`X-MQ-Character-Set`, default 1208 = UTF-8);
+- `Content-Type: application/octet-stream` or `X-MQ-Format: NONE` — bytes go through untouched.
+
+Optional headers:
+
+| Header | Value | Default |
+|---|---|---|
+| `X-MQ-Message-Type` | `DATAGRAM` / `REQUEST` / `REPLY` / `REPORT` or a number | `DATAGRAM` |
+| `X-MQ-Format` | **body** format (8 chars max, `NONE` = binary) | `MQSTR` |
+| `X-MQ-Character-Set` | body CCSID | `1208` |
+| `X-MQ-Encoding` | MQMD Encoding | platform |
+| `X-MQ-Message-Id` / `X-MQ-Correlation-Id` | hex up to 48 chars (zero-padded to 24 bytes) | MQ-generated / zeros |
+| `X-MQ-Reply-To-Queue` / `X-MQ-Reply-To-Queue-Manager` | string | empty |
+| `X-MQ-Priority` | 0–9 | queue default |
+| `X-MQ-Persistence` | 0 / 1 / 2 | queue default |
+| `X-MQ-Expiry` | tenths of a second, `-1` = unlimited | `-1` |
+| `X-MQ-Usr-<name>` | RFH2 usr property | — |
+| `X-MQ-Properties` | usr properties as one JSON object | — |
+
+Response `201`: `{"queue","messageId","correlationId"}`.
+
+Note: MQ itself rejects `X-MQ-Message-Type: REQUEST` without `X-MQ-Reply-To-Queue` (RC 2027 `MQRC_MISSING_REPLY_TO_Q`).
+
+### DELETE /queues/{queue}/messages
+
+Purge the queue. Message bodies are **not transferred over the network** (truncated get with a zero buffer), so clearing tens of thousands of messages takes seconds. Response: `{"queue","purged","remaining"}`.
+
+### POST /rpc?requestQueue=A&replyQueue=B&timeoutSeconds=30&correlation=msgId
+
+Synchronous request-reply in one call — for integrations that read requests from one queue and reply into another:
+
+1. The body and `X-MQ-*` headers (same as POST) are sent to `requestQueue`; `ReplyToQ` is set to `replyQueue` automatically, message type defaults to `REQUEST`.
+2. The service waits (up to `timeoutSeconds`, max 300) for a message in `replyQueue` with the matching `CorrelId` and returns it like the single-message GET (+ the `X-MQ-Request-Message-Id` header).
+
+`correlation=msgId` (default, the MQ standard) matches the reply by `CorrelId = request MsgId`; `correlation=corrId` (passthrough) matches by `CorrelId = request CorrelId` (requires `X-MQ-Correlation-Id`; the request is sent with `MQRO_PASS_CORREL_ID` so report-honoring responders reply correctly).
+
+Timeout → `504`; the request is already in `requestQueue` by then (its MsgId is in `X-MQ-Request-Message-Id`).
+
+## RFH2 and message properties (usr.*)
+
+- **Reading**: message properties are forced into RFH2 form (`MQGMO_PROPERTIES_FORCE_MQRFH2`) and parsed by the service — whether they were set by a JMS app, IIB/ACE, or a physical RFH2. `usr` folder fields come under their own names (`operation`); other folders are prefixed (`jms.Dst`). The body format/CCSID/encoding are taken from the RFH2, and the body is served without the header.
+- **Writing**: any `X-MQ-Usr-<name>` header and/or `X-MQ-Properties: {"name":"value"}` adds an RFH2 with a usr folder. Dotted keys (`jms.Dst`) are written back into their native folders — replaying a browsed message preserves folder placement.
+- **Case sensitivity**: MQ property names are case-sensitive (`operation` ≠ `Operation`), while HTTP header **names** are not — and some clients normalize them (Python's `urllib` turns `X-MQ-Usr-operation` into `X-Mq-Usr-Operation`). Postman and curl preserve case. When case matters, use `X-MQ-Properties`: JSON in a header **value** always survives intact.
+- Non-ASCII property values in response headers are URL-encoded; the `X-MQ-Encoded-Headers` header lists which ones.
+
+## Error mapping
+
+All errors are JSON: `{"error","details","mqCompletionCode","mqReasonCode","cause"}`, where `details` is the symbolic reason name.
+
+| MQ reason | HTTP |
+|---|---|
+| 2085 no such queue, 2033 no such message | 404 |
+| 2035 not authorized | 403 |
+| 2042 exclusive use, 2016/2051 get/put inhibited, 2053 queue full | 409 |
+| 2030/2031/2218 message too big | 413 |
+| 2043/2045/2068 wrong object type (remote/alias queue), 2142 malformed header | 400 |
+| 2009/2058/2059/2537/2538/2540 connection/channel/QM issues | 502 |
+| RPC timeout | 504 |
+
+## Testing
+
+The e2e suite (43 checks: put/browse/get/delete/purge, RFH2 usr properties, RPC round-trip and timeout, binary bodies, UTF-8/UTF-16, limits, error codes) runs against IBM MQ Advanced for Developers in Docker:
+
+```bash
+docker run -d --name mq --platform linux/amd64 -e LICENSE=accept -e MQ_QMGR_NAME=QM1 \
+  -e MQ_APP_PASSWORD=passw0rd -p 11414:1414 icr.io/ibm-messaging/mq:latest
+java -jar app/build/libs/mq-workbench.jar --host=localhost --port=11414 \
+  --channel=DEV.APP.SVRCONN --qmgr=QM1 --user=app --password=passw0rd --api-port=18080
 ```
 
-Возможные ошибки:
-- `400 Bad Request` — пустое тело, невалидный JSON или некорректное значение заголовка.
-- `500 Internal Server Error` — ошибка MQ (содержит `CC` и `RC` коды).
+## Roadmap
 
-### DELETE /messages/{queue}
+- **WireMock-backed responder**: a background listener on a request queue that routes each message by its `usr.operation` property to a WireMock stub (`POST {wiremock}/mq/{operation}`) and puts the stub's response into the reply queue with proper correlation — turning the workbench into a full MQ integration stub. Managed via `POST/GET/DELETE /responders`.
 
-Очистить очередь — destructive get всех сообщений. Выполняется без syncpoint (каждое удаление коммитится сразу), чтобы не копить большую транзакцию на очередях с десятками тысяч сообщений.
-
-Ответ:
-
-```json
-{ "queue": "DEV.QUEUE.1", "purged": 42 }
-```
-
-## Структура
+## Project layout
 
 ```
-app/src/main/java/ru/ds/
-├── MqApi.java        — точка входа: Javalin + эндпоинты
-├── MqReader.java     — сервис чтения (browseAll, purge)
-├── MqSender.java     — сервис отправки (send с SendOptions)
-├── MessageDto.java   — DTO одного сообщения
-├── SendOptions.java  — параметры MQMD для отправки
-└── MqArgs.java       — парсер CLI-аргументов
+app/src/main/java/me/waldemar/
+├── MqApi.java               — HTTP layer: routes, X-MQ-* headers, error mapping
+├── MqService.java           — operations: browse/get/put/purge/rpc/queueInfo
+├── Messages.java            — MQMessage codec: MQMD, RFH2/MQDLH chains, CCSID handling
+├── MqConnectionFactory.java — per-request connections (+ MQCSP authentication)
+├── AppConfig.java           — config from CLI / env / .env
+├── StoredMessage.java       — a parsed message
+├── PutOptions.java          — put parameters
+└── MqArgs.java              — CLI argument parser
 ```
-
-Поток вызова: HTTP-запрос → handler в `MqApi` → `MqReader` / `MqSender` → IBM MQ → JSON-ответ.
