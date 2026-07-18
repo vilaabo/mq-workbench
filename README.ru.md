@@ -1,5 +1,8 @@
 # mq-workbench
 
+[![build](https://github.com/vilaabo/mq-workbench/actions/workflows/build.yml/badge.svg)](https://github.com/vilaabo/mq-workbench/actions/workflows/build.yml)
+[![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 [English](README.md) | **Русский**
 
 HTTP-верстак для очередей **IBM MQ**: browse, put, get, purge и синхронный запрос-ответ — из Postman, curl или любого HTTP-клиента, на любой ОС. Кроссплатформенная альтернатива классической Windows-утилите RFHUtil.

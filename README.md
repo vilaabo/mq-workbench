@@ -1,5 +1,8 @@
 # mq-workbench
 
+[![build](https://github.com/vilaabo/mq-workbench/actions/workflows/build.yml/badge.svg)](https://github.com/vilaabo/mq-workbench/actions/workflows/build.yml)
+[![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 **English** | [Русский](README.ru.md)
 
 HTTP workbench for **IBM MQ** queues: browse, put, get, purge and synchronous request-reply — from Postman, curl, or any HTTP client, on any OS. A cross-platform alternative to the classic Windows-only RFHUtil.
