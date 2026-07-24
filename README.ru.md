@@ -19,6 +19,7 @@ HTTP-верстак для очередей **IBM MQ**: browse, put, get, purge 
 - Stateless: соединение с MQ на каждый запрос — обрыв сети или рестарт менеджера очередей не требуют рестарта сервиса
 - Ошибки MQ маппятся на честные HTTP-статусы с символьными именами кодов (`MQRC_UNKNOWN_OBJECT_NAME` → 404)
 - **Swagger UI** на `/swagger` (спека OpenAPI 3.0 — на `/openapi.json`) — можно смотреть и дёргать все эндпоинты прямо из браузера
+- **WireMock-респондеры** (`/responders`) — фоновые слушатели, превращающие WireMock в полноценную заглушку MQ-интеграций: запрос из очереди → стаб по свойству `usr.operation` → ответ стаба в очередь ответов с корреляцией
 
 ## Быстрый старт
 
@@ -120,6 +121,40 @@ X-MQ-Properties (все свойства одним JSON-объектом)
 
 Таймаут → `504`; сам запрос к этому моменту уже лежит в `requestQueue` (его MsgId — в `X-MQ-Request-Message-Id`).
 
+## Респондеры: заглушки MQ-интеграций через WireMock
+
+Респондер — фоновый слушатель, изображающий интеграцию, которая общается через очереди:
+
+```
+запрос интеграции → requestQueue → [респондер] → POST {wiremockUrl}/mq/{operation} → стаб WireMock
+очередь ответов ← ответ с корреляцией ← тело ответа стаба
+```
+
+```bash
+curl -X POST http://localhost:8080/responders -H 'Content-Type: application/json' -d '{
+  "name": "orders",
+  "requestQueue": "APP.REQUEST.Q",
+  "replyQueue": "APP.REPLY.Q",
+  "wiremockUrl": "http://wiremock:8080"
+}'
+```
+
+| Поле | Дефолт | Смысл |
+|---|---|---|
+| `name` | — | Уникальное имя респондера |
+| `requestQueue` | — | Слушаемая очередь |
+| `replyQueue` | — | Очередь ответов по умолчанию (MQMD `ReplyToQ` запроса главнее, если задан) |
+| `wiremockUrl` | — | Базовый URL WireMock |
+| `pathTemplate` | `/mq/{operation}` | Путь стаба; `{operation}` = значение свойства операции |
+| `operationProperty` | `operation` | Какое usr-свойство маршрутизирует на стаб |
+| `correlation` | `auto` | `auto` уважает MQMD Report-флаги запроса (как MQReply в IIB/ACE); `msgId` — CorrelId ответа := MsgId запроса; `corrId` — passthrough |
+| `wiremockTimeoutSeconds` | `10` | HTTP-таймаут похода в стаб |
+| `useRequestReplyToQueue` | `true` | Предпочитать `ReplyToQ` запроса перед `replyQueue` |
+
+В WireMock уходит тело сообщения как есть плюс заголовки `X-MQ-Operation`, `X-MQ-Properties`, `X-MQ-Message-Id`, `X-MQ-Correlation-Id` — стабы матчатся по URL, заголовку или телу. Стаб управляет метаданными ответа через свои HTTP-заголовки (`X-MQ-Properties`, `X-MQ-Format`, `X-MQ-Character-Set`, `X-MQ-Message-Type`, `X-MQ-Expiry`). **HTTP 204** от стаба = «промолчать» (негативный сценарий «система не ответила»); не-2xx считается ошибкой в статистике, ответ не отправляется.
+
+`GET /responders` — живая статистика: state (`RUNNING`/`RECONNECTING`), `received`, `replied`, `silenced`, `errors`, `lastError`. Респондеры переживают рестарт менеджера очередей (автопереподключение с бэкоффом), но живут в памяти процесса — для автостарта после рестарта сервиса передай `--responders=file.json` (или `RESPONDERS_FILE`) с массивом таких же конфигов.
+
 ## RFH2 и свойства сообщений (usr.*)
 
 - **Чтение**: свойства сообщений принудительно материализуются как RFH2 (`MQGMO_PROPERTIES_FORCE_MQRFH2`) и разбираются сервисом — независимо от того, положены они JMS-приложением, IIB/ACE или физическим RFH2. Поля папки `usr` отдаются под своими именами (`operation`), поля других папок — с префиксом (`jms.Dst`). Формат/CCSID/encoding тела берутся из RFH2, тело отдаётся уже без заголовка.
@@ -154,7 +189,10 @@ java -jar app/build/libs/mq-workbench.jar --host=localhost --port=11414 \
 
 ## Планы
 
-- **WireMock-респондер**: фоновый слушатель очереди запросов, который маршрутизирует каждое сообщение по свойству `usr.operation` в стаб WireMock (`POST {wiremock}/mq/{operation}`) и кладёт ответ стаба в очередь ответов с правильной корреляцией — превращая верстак в полноценную заглушку MQ-интеграций. Управление через `POST/GET/DELETE /responders`.
+- Блокирующее ожидание сообщения для автотестов (`GET /queues/{q}/wait?...`)
+- Фильтры browse (`?contains=`, `?property=`)
+- Хаос-режимы респондеров (задержки, дубли ответов, битые тела)
+- Реплей из dead-letter queue
 
 ## Структура
 

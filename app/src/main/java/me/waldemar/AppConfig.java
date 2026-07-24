@@ -17,7 +17,8 @@ public record AppConfig(
         String qmgr,
         String user,
         String password,
-        int apiPort
+        int apiPort,
+        String respondersFile
 ) {
 
     public static AppConfig load(String[] args) {
@@ -32,6 +33,7 @@ public record AppConfig(
         String user = pick(cli, "user", env, "MQ_USER");
         String password = pick(cli, "password", env, "MQ_PASSWORD");
         String apiPortStr = pick(cli, "api-port", env, "API_PORT");
+        String respondersFile = pick(cli, "responders", env, "RESPONDERS_FILE");
 
         require(host, "--host / MQ_HOST");
         require(portStr, "--port / MQ_PORT");
@@ -45,7 +47,8 @@ public record AppConfig(
                 qmgr,
                 user,
                 password,
-                apiPortStr == null ? 8080 : parseInt(apiPortStr, "--api-port / API_PORT"));
+                apiPortStr == null ? 8080 : parseInt(apiPortStr, "--api-port / API_PORT"),
+                respondersFile);
     }
 
     /** .env дополняет окружение, но не перекрывает его. */

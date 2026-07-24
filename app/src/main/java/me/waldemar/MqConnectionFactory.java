@@ -23,8 +23,13 @@ public class MqConnectionFactory {
         T apply(MQQueueManager qMgr) throws MQException, IOException;
     }
 
+    /** Открывает новое соединение. Вызывающий отвечает за disconnect (респондеры держат его подолгу). */
+    public MQQueueManager connect() throws MQException {
+        return new MQQueueManager(cfg.qmgr(), connectionProperties());
+    }
+
     public <T> T withQueueManager(MqCallable<T> body) throws MQException, IOException {
-        MQQueueManager qMgr = new MQQueueManager(cfg.qmgr(), connectionProperties());
+        MQQueueManager qMgr = connect();
         try {
             return body.apply(qMgr);
         } finally {

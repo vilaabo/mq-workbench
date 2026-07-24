@@ -19,6 +19,7 @@ The API philosophy: **message body = HTTP body** (JSON, XML, binary — as is), 
 - Stateless: a fresh MQ connection per request — network drops or queue manager restarts never require a service restart
 - MQ errors mapped to honest HTTP statuses with symbolic reason names (`MQRC_UNKNOWN_OBJECT_NAME` → 404)
 - **Swagger UI** at `/swagger` (OpenAPI 3.0 spec at `/openapi.json`) — explore and call every endpoint straight from the browser
+- **WireMock-backed responders** (`/responders`) — background listeners that turn WireMock into a full MQ integration stub: request from a queue → stub matched by the `usr.operation` property → stub's response back into the reply queue with proper correlation
 
 ## Quick start
 
@@ -120,6 +121,40 @@ Synchronous request-reply in one call — for integrations that read requests fr
 
 Timeout → `504`; the request is already in `requestQueue` by then (its MsgId is in `X-MQ-Request-Message-Id`).
 
+## Responders: stubbing MQ integrations with WireMock
+
+A responder is a background listener that impersonates a queue-based integration:
+
+```
+integration request → requestQueue → [responder] → POST {wiremockUrl}/mq/{operation} → WireMock stub
+reply queue ← reply message with correlation ← stub's response body
+```
+
+```bash
+curl -X POST http://localhost:8080/responders -H 'Content-Type: application/json' -d '{
+  "name": "orders",
+  "requestQueue": "APP.REQUEST.Q",
+  "replyQueue": "APP.REPLY.Q",
+  "wiremockUrl": "http://wiremock:8080"
+}'
+```
+
+| Field | Default | Meaning |
+|---|---|---|
+| `name` | — | Unique responder name |
+| `requestQueue` | — | Queue to listen on |
+| `replyQueue` | — | Fallback reply queue (the request's MQMD `ReplyToQ` wins when present) |
+| `wiremockUrl` | — | WireMock base URL |
+| `pathTemplate` | `/mq/{operation}` | Stub URL path; `{operation}` = value of the operation property |
+| `operationProperty` | `operation` | Which usr property routes to a stub |
+| `correlation` | `auto` | `auto` honors the request's MQMD Report flags (like IIB/ACE MQReply); `msgId` = reply CorrelId := request MsgId; `corrId` = passthrough |
+| `wiremockTimeoutSeconds` | `10` | HTTP timeout for the stub call |
+| `useRequestReplyToQueue` | `true` | Prefer the request's `ReplyToQ` over `replyQueue` |
+
+The WireMock call carries the message body as-is plus `X-MQ-Operation`, `X-MQ-Properties`, `X-MQ-Message-Id`, `X-MQ-Correlation-Id` headers — match stubs by URL, header, or body. The stub controls reply metadata via its own response headers (`X-MQ-Properties`, `X-MQ-Format`, `X-MQ-Character-Set`, `X-MQ-Message-Type`, `X-MQ-Expiry`). **HTTP 204** from the stub means "stay silent" (negative scenarios: the integration never answers); non-2xx counts as an error in the responder's stats and no reply is sent.
+
+`GET /responders` returns live stats per responder: state (`RUNNING`/`RECONNECTING`), `received`, `replied`, `silenced`, `errors`, `lastError`. Responders survive queue manager restarts (automatic reconnect with backoff) but live in process memory — for auto-start after a service restart pass `--responders=file.json` (or `RESPONDERS_FILE`) with an array of the same config objects.
+
 ## RFH2 and message properties (usr.*)
 
 - **Reading**: message properties are forced into RFH2 form (`MQGMO_PROPERTIES_FORCE_MQRFH2`) and parsed by the service — whether they were set by a JMS app, IIB/ACE, or a physical RFH2. `usr` folder fields come under their own names (`operation`); other folders are prefixed (`jms.Dst`). The body format/CCSID/encoding are taken from the RFH2, and the body is served without the header.
@@ -154,7 +189,10 @@ java -jar app/build/libs/mq-workbench.jar --host=localhost --port=11414 \
 
 ## Roadmap
 
-- **WireMock-backed responder**: a background listener on a request queue that routes each message by its `usr.operation` property to a WireMock stub (`POST {wiremock}/mq/{operation}`) and puts the stub's response into the reply queue with proper correlation — turning the workbench into a full MQ integration stub. Managed via `POST/GET/DELETE /responders`.
+- Blocking wait-for-message endpoint for autotests (`GET /queues/{q}/wait?...`)
+- Browse filters (`?contains=`, `?property=`)
+- Chaos modes for responders (delays, duplicate replies, malformed bodies)
+- Dead-letter queue requeue helper
 
 ## Project layout
 

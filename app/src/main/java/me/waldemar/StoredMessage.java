@@ -17,6 +17,7 @@ public record StoredMessage(
         int priority,
         int persistence,
         int expiry,
+        int report,
         String putDateTime,
         String replyToQueue,
         String replyToQueueManager,

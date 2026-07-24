@@ -91,6 +91,7 @@ public final class Messages {
                 msg.priority,
                 msg.persistence,
                 msg.expiry,
+                msg.report,
                 msg.putDateTime == null ? null : msg.putDateTime.toInstant().toString(),
                 msg.replyToQueueName.trim(),
                 msg.replyToQueueManagerName.trim(),

@@ -52,10 +52,12 @@ public class MqApi {
 
     private final AppConfig cfg;
     private final MqService mq;
+    private final ResponderManager responders;
 
-    MqApi(AppConfig cfg, MqService mq) {
+    MqApi(AppConfig cfg, MqService mq, ResponderManager responders) {
         this.cfg = cfg;
         this.mq = mq;
+        this.responders = responders;
     }
 
     public static void main(String[] args) {
@@ -72,19 +74,24 @@ public class MqApi {
             return;
         }
 
-        MqApi api = new MqApi(cfg, new MqService(new MqConnectionFactory(cfg)));
+        MqConnectionFactory factory = new MqConnectionFactory(cfg);
+        ResponderManager responderManager = new ResponderManager(factory);
+        MqApi api = new MqApi(cfg, new MqService(factory), responderManager);
 
         Javalin app = Javalin.create(config -> {
             config.showJavalinBanner = false;
             config.useVirtualThreads = true; // RPC блокирует поток до 300 с — Loom делает это дешёвым
             config.http.maxRequestSize = 32L * 1024 * 1024;
-            config.jsonMapper(new JavalinJackson().updateMapper(m -> m.enable(SerializationFeature.INDENT_OUTPUT)));
+            config.jsonMapper(new JavalinJackson().updateMapper(m -> m
+                    .enable(SerializationFeature.INDENT_OUTPUT)
+                    // лишние поля в теле (например, скопированный вывод GET /responders) не должны ронять запрос
+                    .disable(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)));
             config.registerPlugin(new OpenApiPlugin(openApi -> openApi
                     .withDocumentationPath("/openapi.json")
                     .withDefinitionConfiguration((version, definition) -> definition
                             .withInfo(info -> {
                                 info.setTitle("mq-workbench");
-                                info.setVersion("1.1.0");
+                                info.setVersion("1.2.0");
                                 info.setDescription("HTTP workbench for IBM MQ queues: browse, put, get, purge "
                                         + "and synchronous request-reply. Message body = HTTP body, "
                                         + "MQMD/RFH2 metadata = X-MQ-* headers.");
@@ -103,6 +110,20 @@ public class MqApi {
         app.delete("/queues/{queue}/messages/{messageId}", api::consumeMessage);
         app.delete("/queues/{queue}/messages", api::purge);
         app.post("/rpc", api::rpc);
+        app.post("/responders", api::createResponder);
+        app.get("/responders", api::listResponders);
+        app.get("/responders/{name}", api::getResponder);
+        app.delete("/responders/{name}", api::deleteResponder);
+
+        app.exception(ResponderManager.Conflict.class, (e, ctx) -> {
+            ctx.status(HttpStatus.CONFLICT);
+            ctx.json(new ErrorResponse("Conflict", e.getMessage(), null, null, null));
+        });
+
+        app.exception(IllegalArgumentException.class, (e, ctx) -> {
+            ctx.status(HttpStatus.BAD_REQUEST);
+            ctx.json(new ErrorResponse("Bad request", e.getMessage(), null, null, null));
+        });
 
         app.exception(BadInput.class, (e, ctx) -> {
             ctx.status(HttpStatus.BAD_REQUEST);
@@ -128,7 +149,14 @@ public class MqApi {
             ctx.json(new ErrorResponse("Internal error", e.toString(), null, null, null));
         });
 
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            // даём респондерам дослать начатые ответы: сообщение уже забрано из очереди NO_SYNCPOINT-гетом
+            responderManager.stopAll();
+        }, "responders-shutdown"));
+
         app.start(cfg.apiPort());
+
+        bootstrapResponders(cfg, responderManager);
 
         log.info("MQ HTTP API: {} @ {}:{} (канал {}), API-порт {}",
                 cfg.qmgr(), cfg.host(), cfg.port(), cfg.channel(), cfg.apiPort());
@@ -141,6 +169,38 @@ public class MqApi {
         log.info("  DELETE /queues/{{queue}}/messages/{{msgId}}  — забрать одно сообщение (destructive)");
         log.info("  DELETE /queues/{{queue}}/messages            — очистить очередь");
         log.info("  POST   /rpc?requestQueue=A&replyQueue=B      — запрос-ответ одним вызовом");
+        log.info("  POST/GET/DELETE /responders                  — WireMock-респондеры (заглушки интеграций)");
+    }
+
+    /**
+     * Автостарт респондеров из JSON-файла (--responders / RESPONDERS_FILE): массив ResponderConfig.
+     * Каждая запись разбирается отдельно — одна битая не мешает запуску остальных.
+     */
+    private static void bootstrapResponders(AppConfig cfg, ResponderManager manager) {
+        if (cfg.respondersFile() == null || cfg.respondersFile().isBlank()) return;
+        ObjectMapper lenient = JsonMapper.builder()
+                .disable(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
+                .build();
+        JsonNode root;
+        try {
+            root = lenient.readTree(new java.io.File(cfg.respondersFile()));
+        } catch (IOException e) {
+            log.error("Не удалось прочитать файл респондеров {}: {}", cfg.respondersFile(), e.toString());
+            return;
+        }
+        if (!root.isArray()) {
+            log.error("Файл респондеров {} должен содержать JSON-массив конфигураций", cfg.respondersFile());
+            return;
+        }
+        for (JsonNode node : root) {
+            try {
+                Responder.Status st = manager.create(lenient.treeToValue(node, ResponderConfig.class));
+                log.info("Респондер '{}' запущен из {}: {} -> {}", st.name(), cfg.respondersFile(),
+                        st.requestQueue(), st.wiremockUrl());
+            } catch (Exception e) {
+                log.error("Запись респондера из {} пропущена: {}", cfg.respondersFile(), e.toString());
+            }
+        }
     }
 
     // ---------- хендлеры ----------
@@ -396,6 +456,97 @@ public class MqApi {
         log.info("RPC {} -> {}: ответ msgId={}", requestQueue, replyQueue, Messages.hex(r.reply().messageId()));
     }
 
+    @OpenApi(
+            path = "/responders",
+            methods = HttpMethod.POST,
+            summary = "Создать и запустить WireMock-респондер",
+            description = "Фоновый слушатель requestQueue: каждое сообщение уходит в WireMock как "
+                    + "POST {wiremockUrl}{pathTemplate} (плейсхолдер {operation} — значение usr-свойства "
+                    + "operationProperty, дефолт 'operation'), тело ответа стаба кладётся в очередь ответов "
+                    + "с корреляцией. Очередь ответов: MQMD ReplyToQ запроса, иначе replyQueue из конфига. "
+                    + "correlation: auto (дефолт — уважает MQMD Report-флаги, как MQReply в IIB/ACE), "
+                    + "msgId (CorrelId ответа = MsgId запроса), corrId (passthrough). "
+                    + "Стаб управляет метаданными ответа заголовками X-MQ-Properties/X-MQ-Format/"
+                    + "X-MQ-Character-Set/X-MQ-Message-Type/X-MQ-Expiry; HTTP 204 = не отвечать (негативные "
+                    + "сценарии); не-2xx = ошибка в статистику. Респондеры живут в памяти процесса; "
+                    + "для автостарта после рестарта — файл --responders / RESPONDERS_FILE с массивом таких же объектов.",
+            tags = "responders",
+            requestBody = @OpenApiRequestBody(required = true,
+                    content = @OpenApiContent(from = ResponderConfig.class)),
+            responses = {
+                    @OpenApiResponse(status = "201", content = @OpenApiContent(from = Responder.Status.class)),
+                    @OpenApiResponse(status = "400", description = "Неполная/невалидная конфигурация",
+                            content = @OpenApiContent(from = ErrorResponse.class)),
+                    @OpenApiResponse(status = "409", description = "Имя уже занято",
+                            content = @OpenApiContent(from = ErrorResponse.class))
+            })
+    private void createResponder(Context ctx) {
+        ResponderConfig config;
+        try {
+            config = ctx.bodyAsClass(ResponderConfig.class);
+        } catch (Exception e) {
+            Throwable root = e;
+            while (root.getCause() != null) root = root.getCause();
+            throw new BadInput("Тело запроса должно быть JSON-объектом ResponderConfig: " + root.getMessage());
+        }
+        Responder.Status status = responders.create(config);
+        ctx.status(HttpStatus.CREATED);
+        ctx.json(status);
+        log.info("RESPONDER '{}' создан: {} -> {}", status.name(), status.requestQueue(), status.wiremockUrl());
+    }
+
+    @OpenApi(
+            path = "/responders",
+            methods = HttpMethod.GET,
+            summary = "Список респондеров со статистикой",
+            tags = "responders",
+            responses = @OpenApiResponse(status = "200",
+                    content = @OpenApiContent(from = Responder.Status[].class)))
+    private void listResponders(Context ctx) {
+        ctx.json(responders.list());
+    }
+
+    @OpenApi(
+            path = "/responders/{name}",
+            methods = HttpMethod.GET,
+            summary = "Статус одного респондера",
+            tags = "responders",
+            pathParams = @OpenApiParam(name = "name", description = "Имя респондера", required = true),
+            responses = {
+                    @OpenApiResponse(status = "200", content = @OpenApiContent(from = Responder.Status.class)),
+                    @OpenApiResponse(status = "404", content = @OpenApiContent(from = ErrorResponse.class))
+            })
+    private void getResponder(Context ctx) {
+        Responder.Status status = responders.status(ctx.pathParam("name"));
+        if (status == null) {
+            ctx.status(HttpStatus.NOT_FOUND);
+            ctx.json(new ErrorResponse("Not found", "Нет респондера с именем " + ctx.pathParam("name"), null, null, null));
+            return;
+        }
+        ctx.json(status);
+    }
+
+    @OpenApi(
+            path = "/responders/{name}",
+            methods = HttpMethod.DELETE,
+            summary = "Остановить и удалить респондер",
+            tags = "responders",
+            pathParams = @OpenApiParam(name = "name", description = "Имя респондера", required = true),
+            responses = {
+                    @OpenApiResponse(status = "200", description = "Остановлен"),
+                    @OpenApiResponse(status = "404", content = @OpenApiContent(from = ErrorResponse.class))
+            })
+    private void deleteResponder(Context ctx) {
+        String name = ctx.pathParam("name");
+        if (!responders.delete(name)) {
+            ctx.status(HttpStatus.NOT_FOUND);
+            ctx.json(new ErrorResponse("Not found", "Нет респондера с именем " + name, null, null, null));
+            return;
+        }
+        ctx.json(Map.of("deleted", name));
+        log.info("RESPONDER '{}' остановлен и удалён", name);
+    }
+
     // ---------- разбор запроса ----------
 
     private static PutOptions parsePutOptions(Context ctx) {
@@ -510,7 +661,7 @@ public class MqApi {
         }
     }
 
-    private static Integer parseMessageType(String s) {
+    static Integer parseMessageType(String s) {
         if (s == null || s.isBlank()) return null;
         String t = s.trim();
         try {
