@@ -9,6 +9,30 @@ HTTP workbench for **IBM MQ** queues: browse, put, get, purge and synchronous re
 
 The API philosophy: **message body = HTTP body** (JSON, XML, binary — as is), **metadata (MQMD, RFH2) = `X-MQ-*` HTTP headers**.
 
+```mermaid
+flowchart LR
+    QA["Postman / curl / autotests"] -->|"REST · X-MQ-* headers"| API
+
+    subgraph WB["mq-workbench"]
+        API["REST API<br>browse · put · get · purge · rpc"]
+        RESP["responder"]
+    end
+
+    subgraph MQ["IBM MQ"]
+        ANYQ[("any queue")]
+        REQ[("APP.REQUEST.Q")]
+        REP[("APP.REPLY.Q")]
+    end
+
+    API <--> ANYQ
+    SUT["app under test"] -->|"request"| REQ
+    REQ --> RESP
+    RESP -->|"POST /mq/{operation}"| WM["WireMock stubs"]
+    WM -->|"body + X-MQ-* headers"| RESP
+    RESP -->|"correlated reply"| REP
+    REP --> SUT
+```
+
 ## Features
 
 - Browse queues without consuming messages, with RFH2/JMS properties and body previews

@@ -9,6 +9,30 @@ HTTP-верстак для очередей **IBM MQ**: browse, put, get, purge 
 
 Философия API: **тело сообщения = HTTP-тело** (JSON, XML, бинарь — как есть), **метаданные (MQMD, RFH2) = HTTP-заголовки `X-MQ-*`**.
 
+```mermaid
+flowchart LR
+    QA["Postman / curl / автотесты"] -->|"REST · заголовки X-MQ-*"| API
+
+    subgraph WB["mq-workbench"]
+        API["REST API<br>browse · put · get · purge · rpc"]
+        RESP["респондер"]
+    end
+
+    subgraph MQ["IBM MQ"]
+        ANYQ[("любая очередь")]
+        REQ[("APP.REQUEST.Q")]
+        REP[("APP.REPLY.Q")]
+    end
+
+    API <--> ANYQ
+    SUT["тестируемая система"] -->|"запрос"| REQ
+    REQ --> RESP
+    RESP -->|"POST /mq/{operation}"| WM["стабы WireMock"]
+    WM -->|"тело + заголовки X-MQ-*"| RESP
+    RESP -->|"ответ с корреляцией"| REP
+    REP --> SUT
+```
+
 ## Возможности
 
 - Browse очередей без удаления сообщений, со свойствами RFH2/JMS и превью тел
