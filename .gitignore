@@ -194,3 +194,7 @@ Temporary Items
 # IBM MQ client trace logs
 mqjms.log*
 mq_dump.txt
+
+# IBM MQ client FFDC dumps
+FFDC/
+*.FDC
